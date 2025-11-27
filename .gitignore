@@ -1,0 +1,4 @@
+bin
+*~
+module.tar.gz
+coverage.out
