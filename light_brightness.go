@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/amimof/huego"
 	toggleswitch "go.viam.com/rdk/components/switch"
@@ -29,7 +30,7 @@ type LightBrightnessConfig struct {
 
 func (cfg *LightBrightnessConfig) Validate(path string) ([]string, []string, error) {
 	if cfg.Username == "" {
-		return nil, nil, fmt.Errorf("need a username (API key) for the Hue bridge")
+		return nil, nil, errMissingUsername()
 	}
 	if cfg.LightID == 0 {
 		return nil, nil, fmt.Errorf("need a light_id")
@@ -45,7 +46,9 @@ type hueLightBrightness struct {
 	logger logging.Logger
 	cfg    *LightBrightnessConfig
 
-	bridge  *huego.Bridge
+	bridge *huego.Bridge
+
+	mu      sync.Mutex
 	lastBri uint8 // last brightness set via positions 2-100, used by position 1 to restore
 }
 
@@ -80,7 +83,11 @@ func (s *hueLightBrightness) Name() resource.Name {
 }
 
 func (s *hueLightBrightness) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	return nil, nil
+	return map[string]interface{}{}, nil
+}
+
+func (s *hueLightBrightness) Status(ctx context.Context) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
 }
 
 // SetPosition controls on/off and brightness.
@@ -95,6 +102,9 @@ func (s *hueLightBrightness) SetPosition(ctx context.Context, position uint32, e
 		return fmt.Errorf("failed to get light state: %w", err)
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if position == 0 {
 		return light.SetState(huego.State{On: false})
 	}
@@ -104,8 +114,11 @@ func (s *hueLightBrightness) SetPosition(ctx context.Context, position uint32, e
 
 	// Map 2-100 linearly to Hue brightness range 1-254.
 	bri := max(uint8(math.Round(float64(position-2)/98.0*253.0)), 1)
+	if err := light.SetState(huego.State{On: true, Bri: bri}); err != nil {
+		return err
+	}
 	s.lastBri = bri
-	return light.SetState(huego.State{On: true, Bri: bri})
+	return nil
 }
 
 func (s *hueLightBrightness) GetPosition(ctx context.Context, extra map[string]interface{}) (uint32, error) {
@@ -113,8 +126,7 @@ func (s *hueLightBrightness) GetPosition(ctx context.Context, extra map[string]i
 	if err != nil {
 		return 0, fmt.Errorf("failed to get light state: %w", err)
 	}
-
-	if !light.State.On {
+	if light.State == nil || !light.State.On {
 		return 0, nil
 	}
 

@@ -31,22 +31,13 @@ type DiscoveryConfig struct {
 
 func (cfg *DiscoveryConfig) Validate(path string) ([]string, []string, error) {
 	if cfg.Username == "" {
-		return nil, nil, fmt.Errorf("need a username (API key) for the Hue bridge")
+		return nil, nil, errMissingUsername()
 	}
 	return nil, nil, nil
 }
 
 func NewDiscovery(logger logging.Logger) *HueDiscover {
 	return &HueDiscover{logger: logger}
-}
-
-// DiscoverBridge finds a Hue bridge on the network and returns its host address
-func DiscoverBridge() (string, error) {
-	bridge, err := huego.Discover()
-	if err != nil {
-		return "", err
-	}
-	return bridge.Host, nil
 }
 
 // CreateUser creates a new user on the Hue bridge. The link button must be pressed first.
@@ -84,32 +75,27 @@ func newHueDiscover(ctx context.Context, _ resource.Dependencies, rawConf resour
 		return nil, err
 	}
 
+	bridgeHost, err := resolveBridgeHost(conf.BridgeHost, logger)
+	if err != nil {
+		return nil, err
+	}
+
 	s := &HueDiscover{
 		name:   rawConf.ResourceName(),
 		logger: logger,
-		cfg:    conf,
+		// Copy the config so the resolved host is stored without mutating the
+		// converted attributes owned by the resource.Config.
+		cfg: &DiscoveryConfig{
+			BridgeHost: bridgeHost,
+			Username:   conf.Username,
+		},
+		bridge: huego.New(bridgeHost, conf.Username),
 	}
-
-	bridgeHost := conf.BridgeHost
-
-	// If no bridge host specified, discover it automatically
-	if bridgeHost == "" {
-		s.logger.Info("No bridge_host specified, discovering Hue bridge...")
-		bridge, err := huego.Discover()
-		if err != nil {
-			return nil, fmt.Errorf("failed to discover Hue bridge: %w", err)
-		}
-		bridgeHost = bridge.Host
-		s.logger.Infof("Discovered Hue bridge at %s", bridgeHost)
-		s.cfg.BridgeHost = bridgeHost
-	}
-
-	s.bridge = huego.New(bridgeHost, conf.Username)
 
 	// Test connection by getting bridge config
 	_, err = s.bridge.GetConfig()
 	if err != nil {
-		return nil, fmt.Errorf("cannot connect to Hue bridge at %s: %w", bridgeHost, err)
+		return nil, fmt.Errorf("cannot connect to Hue bridge at %s: %w\n%s", bridgeHost, err, SetupHelp)
 	}
 
 	return s, nil
@@ -120,7 +106,11 @@ func (s *HueDiscover) Name() resource.Name {
 }
 
 func (s *HueDiscover) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	return nil, nil
+	return map[string]interface{}{}, nil
+}
+
+func (s *HueDiscover) Status(ctx context.Context) (map[string]interface{}, error) {
+	return map[string]interface{}{"bridge_host": s.cfg.BridgeHost}, nil
 }
 
 func (s *HueDiscover) DiscoverResources(ctx context.Context, extra map[string]any) ([]resource.Config, error) {
@@ -138,6 +128,32 @@ func sanitizeName(name string) string {
 	return strings.Trim(s, "-")
 }
 
+// nameAllocator hands out unique resource names. Two lights whose names
+// sanitize to the same string get the light ID appended; a name that
+// sanitizes to nothing falls back to "hue-light-<id>".
+type nameAllocator struct {
+	used map[string]bool
+}
+
+func newNameAllocator() *nameAllocator {
+	return &nameAllocator{used: map[string]bool{}}
+}
+
+func (a *nameAllocator) allocate(base string, lightID int) string {
+	if base == "" {
+		base = fmt.Sprintf("hue-light-%d", lightID)
+	}
+	name := base
+	if a.used[name] {
+		name = fmt.Sprintf("%s-%d", base, lightID)
+	}
+	for i := 2; a.used[name]; i++ {
+		name = fmt.Sprintf("%s-%d-%d", base, lightID, i)
+	}
+	a.used[name] = true
+	return name
+}
+
 func (s *HueDiscover) DiscoverHue(ctx context.Context) ([]resource.Config, error) {
 	lights, err := s.bridge.GetLights()
 	if err != nil {
@@ -146,17 +162,18 @@ func (s *HueDiscover) DiscoverHue(ctx context.Context) ([]resource.Config, error
 
 	configs := []resource.Config{}
 	var colorLightIDs []int
+	names := newNameAllocator()
 
 	for _, light := range lights {
 		colorMode := ""
 		if light.State != nil {
 			colorMode = light.State.ColorMode
 		}
-		supportsColor := colorMode == "xy" || colorMode == "hs"
+		supportsColor := lightSupportsColor(light)
 
-		s.logger.Debugf("discovery result light: %d %s type: %s colormode: %s", light.ID, light.Name, light.Type, colorMode)
+		s.logger.Debugf("discovery result light: %d %s type: %s colormode: %s color: %v", light.ID, light.Name, light.Type, colorMode, supportsColor)
 
-		safeName := sanitizeName(light.Name)
+		safeName := names.allocate(sanitizeName(light.Name), light.ID)
 
 		baseAttrs := utils.AttributeMap{
 			"bridge_host": s.cfg.BridgeHost,
@@ -183,7 +200,7 @@ func (s *HueDiscover) DiscoverHue(ctx context.Context) ([]resource.Config, error
 					"channel":     channel,
 				}
 				configs = append(configs, resource.Config{
-					Name:       fmt.Sprintf("%s-%s", safeName, channel),
+					Name:       names.allocate(fmt.Sprintf("%s-%s", safeName, channel), light.ID),
 					API:        toggleswitch.API,
 					Model:      HueLightColor,
 					Attributes: channelAttrs,
@@ -195,13 +212,15 @@ func (s *HueDiscover) DiscoverHue(ctx context.Context) ([]resource.Config, error
 	// Emit a single mode switch covering all color-capable lights.
 	if len(colorLightIDs) > 0 {
 		configs = append(configs, resource.Config{
-			Name:  "hue-mode",
+			Name:  names.allocate("hue-mode", 0),
 			API:   toggleswitch.API,
 			Model: HueLightMode,
 			Attributes: utils.AttributeMap{
 				"bridge_host": s.cfg.BridgeHost,
 				"username":    s.cfg.Username,
 				"dance":       map[string][]int{"all": colorLightIDs},
+				"daylight":    colorLightIDs,
+				"warm":        colorLightIDs,
 			},
 		})
 	}

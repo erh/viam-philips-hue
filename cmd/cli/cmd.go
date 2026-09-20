@@ -41,7 +41,7 @@ func realMain() error {
 		logger.Info("No bridge specified, discovering...")
 		bridge, err := hue.DiscoverBridge()
 		if err != nil {
-			return fmt.Errorf("failed to discover bridge: %w", err)
+			return fmt.Errorf("failed to discover bridge (pass -bridge <ip> to skip discovery): %w", err)
 		}
 		*bridgeHost = bridge
 		logger.Infof("Found bridge at %s", *bridgeHost)
@@ -62,7 +62,7 @@ func realMain() error {
 	}
 
 	if *username == "" {
-		return fmt.Errorf("need -username flag (or use -register to create one)")
+		return fmt.Errorf("need -username flag (or use -register to create one)\n%s", hue.SetupHelp)
 	}
 
 	// Create a simple discovery helper directly

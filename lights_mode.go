@@ -32,7 +32,7 @@ type LightModeConfig struct {
 
 func (cfg *LightModeConfig) Validate(path string) ([]string, []string, error) {
 	if cfg.Username == "" {
-		return nil, nil, fmt.Errorf("need a username (API key) for the Hue bridge")
+		return nil, nil, errMissingUsername()
 	}
 	return nil, nil, nil
 }
@@ -52,7 +52,7 @@ type hueLightMode struct {
 
 	mu          sync.Mutex
 	position    uint32
-	savedStates map[int]*huego.State // light ID -> saved state before mode was activated
+	savedStates map[int]*huego.State // light ID -> saved state before any mode was activated
 }
 
 func newHueLightMode(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (toggleswitch.Switch, error) {
@@ -61,15 +61,9 @@ func newHueLightMode(ctx context.Context, deps resource.Dependencies, rawConf re
 		return nil, err
 	}
 
-	bridgeHost := conf.BridgeHost
-	if bridgeHost == "" {
-		logger.Info("No bridge_host specified, discovering Hue bridge...")
-		b, err := huego.Discover()
-		if err != nil {
-			return nil, fmt.Errorf("failed to discover Hue bridge: %w", err)
-		}
-		bridgeHost = b.Host
-		logger.Infof("Discovered Hue bridge at %s", bridgeHost)
+	bridgeHost, err := resolveBridgeHost(conf.BridgeHost, logger)
+	if err != nil {
+		return nil, err
 	}
 
 	s := &hueLightMode{
@@ -88,7 +82,13 @@ func (s *hueLightMode) Name() resource.Name {
 }
 
 func (s *hueLightMode) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	return nil, nil
+	return map[string]interface{}{}, nil
+}
+
+func (s *hueLightMode) Status(ctx context.Context) (map[string]interface{}, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return map[string]interface{}{"mode": modeNames[s.position]}, nil
 }
 
 // SetPosition switches between modes.
@@ -114,9 +114,11 @@ func (s *hueLightMode) SetPosition(ctx context.Context, position uint32, extra m
 	case "dance":
 		return s.activateDance(s.cfg.Dance, position)
 	case "daylight":
-		return s.activateDaylight(lightIDs, position)
+		// Cool daylight white (~6500 K, 153 mireds) at full brightness.
+		return s.activateWhite(lightIDs, 254, 153, position)
 	case "warm":
-		return s.activateWarm(lightIDs, position)
+		// Warm incandescent white (~2700 K, 370 mireds) at moderate brightness.
+		return s.activateWhite(lightIDs, 200, 370, position)
 	}
 
 	return fmt.Errorf("unknown mode %q", modeNames[position])
@@ -166,13 +168,22 @@ func sortedKeys(m map[string][]int) []string {
 	return keys
 }
 
-// saveState snapshots the current state of each light before activating a mode.
+// saveState snapshots the current state of each light that has not already
+// been snapshotted. Lights already in savedStates are skipped so that switching
+// directly from one mode to another (dance -> daylight) keeps the original
+// pre-mode state rather than overwriting it with the first mode's state.
+// savedStates is only cleared by restoreState (position 0).
 func (s *hueLightMode) saveState(lightIDs []int) error {
-	s.savedStates = make(map[int]*huego.State)
 	for _, id := range lightIDs {
+		if _, ok := s.savedStates[id]; ok {
+			continue
+		}
 		light, err := s.bridge.GetLight(id)
 		if err != nil {
 			return fmt.Errorf("failed to get state for light %d: %w", id, err)
+		}
+		if light.State == nil {
+			return fmt.Errorf("light %d returned no state", id)
 		}
 		saved := *light.State
 		s.savedStates[id] = &saved
@@ -180,32 +191,38 @@ func (s *hueLightMode) saveState(lightIDs []int) error {
 	return nil
 }
 
+// stopEffect clears any running effect (colorloop) on a light. The bridge
+// processes JSON fields in order and ignores color fields sent in the same
+// request as an effect change, and it rejects effect changes on lights that
+// are off, so this is always sent alone with On:true before any color fields.
+func stopEffect(light *huego.Light) error {
+	return light.SetState(huego.State{On: true, Effect: "none"})
+}
+
 // restoreState restores each saved light back to its pre-mode state.
-// A two-step approach is used: first stop any active effect (colorloop), then
-// apply the saved color fields. This is necessary because the Hue bridge
-// processes JSON fields in order, and sending color fields while an effect is
-// still active causes the bridge to ignore those fields.
+// Three steps per light: stop any active effect, apply the saved brightness and
+// color fields (with the light on, since the bridge rejects color fields on an
+// off light), then turn the light off again if it was off.
 func (s *hueLightMode) restoreState() error {
 	var firstErr error
+	noteErr := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+
 	for id, state := range s.savedStates {
 		light, err := s.bridge.GetLight(id)
 		if err != nil {
 			s.logger.Warnf("failed to get light %d for restore: %v", id, err)
-			if firstErr == nil {
-				firstErr = err
-			}
+			noteErr(err)
 			continue
 		}
 
 		// Step 1: stop the colorloop effect before changing color fields.
-		// Use On:true here regardless of the saved state — the bridge rejects
-		// effect changes on lights that are off. Step 2 will restore the real
-		// on/off state along with the color fields.
-		if err := light.SetState(huego.State{On: true, Effect: "none"}); err != nil {
+		if err := stopEffect(light); err != nil {
 			s.logger.Warnf("failed to stop effect on light %d for restore: %v", id, err)
-			if firstErr == nil {
-				firstErr = err
-			}
+			noteErr(err)
 			continue
 		}
 
@@ -221,7 +238,7 @@ func (s *hueLightMode) restoreState() error {
 			bri = 1
 		}
 		restore := huego.State{
-			On:  state.On,
+			On:  true,
 			Bri: bri,
 		}
 		switch state.ColorMode {
@@ -241,8 +258,17 @@ func (s *hueLightMode) restoreState() error {
 		}
 		if err := light.SetState(restore); err != nil {
 			s.logger.Warnf("failed to restore state for light %d: %v", id, err)
-			if firstErr == nil {
-				firstErr = err
+			noteErr(err)
+			continue
+		}
+
+		// Step 3: the light was off before the mode was activated; turn it back
+		// off. This must be a separate request with no other fields, because the
+		// bridge rejects bri/color fields sent alongside on:false.
+		if !state.On {
+			if err := light.SetState(huego.State{On: false}); err != nil {
+				s.logger.Warnf("failed to turn off light %d for restore: %v", id, err)
+				noteErr(err)
 			}
 		}
 	}
@@ -301,42 +327,27 @@ func (s *hueLightMode) activateDance(groups map[string][]int, position uint32) e
 	return nil
 }
 
-// activateDaylight sets each light to a cool daylight white (~6500 K, 153 mireds).
-func (s *hueLightMode) activateDaylight(lightIDs []int, position uint32) error {
+// activateWhite sets each light to a white at the given brightness and color
+// temperature (mireds). Any running effect is stopped first in a separate
+// request; sending ct alongside effect:"none" would have the ct ignored while
+// the colorloop is still active (see stopEffect).
+func (s *hueLightMode) activateWhite(lightIDs []int, bri uint8, ct uint16, position uint32) error {
+	mode := modeNames[position]
 	for _, id := range lightIDs {
 		light, err := s.bridge.GetLight(id)
 		if err != nil {
 			return fmt.Errorf("failed to get light %d: %w", id, err)
 		}
-		if err := light.SetState(huego.State{
-			On:             true,
-			Bri:            254,
-			Ct:             153,
-			Effect:         "none",
-			TransitionTime: 4,
-		}); err != nil {
-			return fmt.Errorf("failed to set daylight mode on light %d: %w", id, err)
-		}
-	}
-	s.position = position
-	return nil
-}
-
-// activateWarm sets each light to a warm incandescent white (~2700 K, 370 mireds).
-func (s *hueLightMode) activateWarm(lightIDs []int, position uint32) error {
-	for _, id := range lightIDs {
-		light, err := s.bridge.GetLight(id)
-		if err != nil {
-			return fmt.Errorf("failed to get light %d: %w", id, err)
+		if err := stopEffect(light); err != nil {
+			return fmt.Errorf("failed to stop effect on light %d for %s mode: %w", id, mode, err)
 		}
 		if err := light.SetState(huego.State{
 			On:             true,
-			Bri:            200,
-			Ct:             370,
-			Effect:         "none",
+			Bri:            bri,
+			Ct:             ct,
 			TransitionTime: 4,
 		}); err != nil {
-			return fmt.Errorf("failed to set warm mode on light %d: %w", id, err)
+			return fmt.Errorf("failed to set %s mode on light %d: %w", mode, id, err)
 		}
 	}
 	s.position = position

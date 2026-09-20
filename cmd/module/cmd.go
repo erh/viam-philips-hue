@@ -11,9 +11,9 @@ import (
 
 func main() {
 	module.ModularMain(
-		resource.APIModel{toggleswitch.API, hue.HueLightBrightness},
-		resource.APIModel{toggleswitch.API, hue.HueLightColor},
-		resource.APIModel{toggleswitch.API, hue.HueLightMode},
-		resource.APIModel{discovery.API, hue.HueDiscovery},
+		resource.APIModel{API: toggleswitch.API, Model: hue.HueLightBrightness},
+		resource.APIModel{API: toggleswitch.API, Model: hue.HueLightColor},
+		resource.APIModel{API: toggleswitch.API, Model: hue.HueLightMode},
+		resource.APIModel{API: discovery.API, Model: hue.HueDiscovery},
 	)
 }

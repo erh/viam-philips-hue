@@ -30,7 +30,7 @@ type LightColorConfig struct {
 
 func (cfg *LightColorConfig) Validate(path string) ([]string, []string, error) {
 	if cfg.Username == "" {
-		return nil, nil, fmt.Errorf("need a username (API key) for the Hue bridge")
+		return nil, nil, errMissingUsername()
 	}
 	if cfg.LightID == 0 {
 		return nil, nil, fmt.Errorf("need a light_id")
@@ -66,9 +66,13 @@ func newHueLightColor(ctx context.Context, deps resource.Dependencies, rawConf r
 		cfg:    conf,
 	}
 
-	s.bridge, _, err = connectToLight(conf.BridgeHost, conf.Username, conf.LightID, logger)
+	var light *huego.Light
+	s.bridge, light, err = connectToLight(conf.BridgeHost, conf.Username, conf.LightID, logger)
 	if err != nil {
 		return nil, err
+	}
+	if !lightSupportsColor(*light) {
+		logger.Warnf("light %d (%s, type %q) does not appear to support color; color changes may be rejected", light.ID, light.Name, light.Type)
 	}
 
 	return s, nil
@@ -79,6 +83,10 @@ func (s *hueLightColor) Name() resource.Name {
 }
 
 func (s *hueLightColor) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
+}
+
+func (s *hueLightColor) Status(ctx context.Context) (map[string]interface{}, error) {
 	return map[string]interface{}{}, nil
 }
 
@@ -94,7 +102,12 @@ func (s *hueLightColor) SetPosition(ctx context.Context, position uint32, extra 
 		return fmt.Errorf("failed to get light state: %w", err)
 	}
 
-	r, g, b := xyBriToRGB(light.State.Xy, light.State.Bri)
+	// An off light reads as (0,0,0) in GetPosition, so compose the new color
+	// from black rather than from the stale color the bridge still reports.
+	var r, g, b uint8
+	if light.State != nil && light.State.On {
+		r, g, b = xyBriToRGB(light.State.Xy, light.State.Bri)
+	}
 
 	channelValue := uint8(position)
 	switch s.cfg.Channel {
@@ -114,16 +127,11 @@ func (s *hueLightColor) SetPosition(ctx context.Context, position uint32, extra 
 		return nil
 	}
 
-	bri := maxChan
-	if bri > 254 {
-		bri = 254
-	}
-
 	x, y := rgbToXY(r, g, b)
 	if err := light.SetState(huego.State{
 		On:  true,
 		Xy:  []float32{x, y},
-		Bri: bri,
+		Bri: maxToBri(maxChan),
 	}); err != nil {
 		return fmt.Errorf("failed to set color: %w", err)
 	}
@@ -138,7 +146,7 @@ func (s *hueLightColor) GetPosition(ctx context.Context, extra map[string]interf
 		return 0, fmt.Errorf("failed to get light state: %w", err)
 	}
 
-	if !light.State.On {
+	if light.State == nil || !light.State.On {
 		return 0, nil
 	}
 
@@ -159,6 +167,27 @@ func (s *hueLightColor) GetPosition(ctx context.Context, extra map[string]interf
 
 func (s *hueLightColor) GetNumberOfPositions(ctx context.Context, extra map[string]interface{}) (uint32, []string, error) {
 	return 256, nil, nil
+}
+
+// Hue Bri is 1–254 while an RGB channel is 0–255, so one value must collide.
+// maxToBri clamps 255 down to 254 and briToMax reads 254 back as 255, so the
+// full-brightness position (255) and every value 1–253 round-trip exactly; a
+// max channel of 254 reads back as 255.
+func maxToBri(maxChan uint8) uint8 {
+	if maxChan > 254 {
+		return 254
+	}
+	if maxChan == 0 {
+		return 1
+	}
+	return maxChan
+}
+
+func briToMax(bri uint8) uint8 {
+	if bri >= 254 {
+		return 255
+	}
+	return bri
 }
 
 // rgbToXY converts sRGB values (0–255) to CIE xy chromaticity coordinates
@@ -182,12 +211,12 @@ func rgbToXY(r, g, b uint8) (x, y float32) {
 
 // xyBriToRGB converts CIE xy chromaticity + brightness to sRGB (0–255).
 //
-// Bri is treated as max(r, g, b) — the encoding SetPosition writes. The
-// color direction is computed at Y=1 (full luminance), the brightest linear
-// channel is normalized to 1.0, gamma is applied to get 8-bit sRGB at full
-// brightness, and then every channel is scaled by Bri/255 so that the
-// brightest channel equals Bri. This matches SetPosition's Bri=max(r,g,b)
-// encoding and makes the round-trip lossless.
+// Bri encodes max(r, g, b) (see maxToBri), which is what SetPosition writes.
+// The color direction is computed at Y=1 (full luminance), the brightest
+// linear channel is normalized to 1.0, gamma is applied to get 8-bit sRGB at
+// full brightness, and then every channel is scaled so that the brightest
+// channel equals the decoded max. This makes the round-trip lossless for the
+// max channel.
 func xyBriToRGB(xy []float32, bri uint8) (r, g, b uint8) {
 	if len(xy) < 2 {
 		return 0, 0, 0
@@ -225,8 +254,8 @@ func xyBriToRGB(xy []float32, bri uint8) (r, g, b uint8) {
 	gFull := float64(linearToSRGB8(gLin))
 	bFull := float64(linearToSRGB8(bLin))
 
-	// Scale by Bri/255 so that max(r,g,b) == Bri, matching SetPosition's encoding.
-	briF := float64(bri) / 255.0
+	// Scale so that max(r,g,b) == decoded max, matching SetPosition's encoding.
+	briF := float64(briToMax(bri)) / 255.0
 	return uint8(math.Round(rFull * briF)),
 		uint8(math.Round(gFull * briF)),
 		uint8(math.Round(bFull * briF))
