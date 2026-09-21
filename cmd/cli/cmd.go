@@ -68,17 +68,20 @@ func realMain() error {
 	// Create a simple discovery helper directly
 	d := hue.NewDiscovery(logger)
 	d.SetBridge(*bridgeHost, *username)
-	all, err := d.DiscoverHue(ctx)
+	all, err := d.DiscoverHue(ctx, nil)
 	if err != nil {
 		return err
 	}
 
-	var info resource.Config
+	var info, bridgeInfo resource.Config
 
 	for _, c := range all {
 		fmt.Printf("%v\n", c)
 		if c.Name == *device {
 			info = c
+		}
+		if c.Model == hue.HueBridge {
+			bridgeInfo = c
 		}
 	}
 
@@ -89,17 +92,14 @@ func realMain() error {
 
 		logger.Infof("found device %v", info)
 
-		reg, found := resource.LookupRegistration(info.API, info.Model)
-		if !found {
-			return fmt.Errorf("cannot find registration")
+		// Devices reference the bridge by name, so build the bridge first.
+		if bridgeInfo.Name != "" {
+			if _, err := construct(ctx, bridgeInfo, logger); err != nil {
+				return fmt.Errorf("failed to construct bridge: %w", err)
+			}
 		}
 
-		info.ConvertedAttributes, err = reg.AttributeMapConverter(info.Attributes)
-		if err != nil {
-			return err
-		}
-
-		thing, err := reg.Constructor(ctx, nil, info, logger)
+		thing, err := construct(ctx, info, logger)
 		if err != nil {
 			return err
 		}
@@ -131,4 +131,17 @@ func realMain() error {
 	}
 
 	return nil
+}
+
+func construct(ctx context.Context, conf resource.Config, logger logging.Logger) (resource.Resource, error) {
+	reg, found := resource.LookupRegistration(conf.API, conf.Model)
+	if !found {
+		return nil, fmt.Errorf("cannot find registration for %s %s", conf.API, conf.Model)
+	}
+	var err error
+	conf.ConvertedAttributes, err = reg.AttributeMapConverter(conf.Attributes)
+	if err != nil {
+		return nil, err
+	}
+	return reg.Constructor(ctx, resource.Dependencies{}, conf, logger)
 }

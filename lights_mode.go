@@ -23,18 +23,20 @@ func init() {
 }
 
 type LightModeConfig struct {
-	BridgeHost string           `json:"bridge_host,omitempty"`
-	Username   string           `json:"username"`
+	Bridge     string           `json:"bridge,omitempty"`      // name of a hue-bridge component
+	BridgeHost string           `json:"bridge_host,omitempty"` // or inline credentials
+	Username   string           `json:"username,omitempty"`
 	Dance      map[string][]int `json:"dance,omitempty"` // group name -> light IDs, lights in a group stay in sync
 	Daylight   []int            `json:"daylight,omitempty"`
 	Warm       []int            `json:"warm,omitempty"`
 }
 
 func (cfg *LightModeConfig) Validate(path string) ([]string, []string, error) {
-	if cfg.Username == "" {
-		return nil, nil, errMissingUsername()
+	deps, err := validateBridgeRef(cfg.Bridge, cfg.Username)
+	if err != nil {
+		return nil, nil, err
 	}
-	return nil, nil, nil
+	return deps, nil, nil
 }
 
 // positions maps switch position to mode name
@@ -61,7 +63,7 @@ func newHueLightMode(ctx context.Context, deps resource.Dependencies, rawConf re
 		return nil, err
 	}
 
-	bridgeHost, err := resolveBridgeHost(conf.BridgeHost, logger)
+	bridge, err := resolveBridge(ctx, deps, conf.Bridge, conf.BridgeHost, conf.Username, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +72,7 @@ func newHueLightMode(ctx context.Context, deps resource.Dependencies, rawConf re
 		name:        rawConf.ResourceName(),
 		logger:      logger,
 		cfg:         conf,
-		bridge:      huego.New(bridgeHost, conf.Username),
+		bridge:      bridge,
 		savedStates: make(map[int]*huego.State),
 	}
 
