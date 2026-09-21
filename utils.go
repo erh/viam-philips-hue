@@ -1,11 +1,14 @@
 package hue
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/amimof/huego"
+	"github.com/viamrobotics/zeroconf"
 	"go.viam.com/rdk/logging"
 )
 
@@ -35,9 +38,17 @@ var (
 	discoveredHost string
 )
 
-// DiscoverBridge finds a Hue bridge on the network and returns its host address.
-// It returns an error (with setup instructions) when no bridge is found.
-func DiscoverBridge() (string, error) {
+// DiscoverBridge finds a Hue bridge on the local network and returns its IP.
+// It tries mDNS first (the bridge advertises _hue._tcp), then falls back to
+// Philips' cloud discovery service, and returns an error with setup
+// instructions when neither finds one.
+func DiscoverBridge(logger logging.Logger) (string, error) {
+	if host, err := discoverBridgeMDNS(logger); err == nil {
+		return host, nil
+	} else {
+		logger.Debugf("mDNS bridge discovery: %v", err)
+	}
+
 	bridge, err := huego.Discover()
 	if err != nil {
 		return "", fmt.Errorf("failed to discover Hue bridge: %w\n%s", err, SetupHelp)
@@ -46,6 +57,47 @@ func DiscoverBridge() (string, error) {
 		return "", fmt.Errorf("no Hue bridge found via discovery; set bridge_host explicitly\n%s", SetupHelp)
 	}
 	return bridge.Host, nil
+}
+
+// mdnsBrowseTime is how long to listen for _hue._tcp announcements.
+const mdnsBrowseTime = 3 * time.Second
+
+// discoverBridgeMDNS browses for _hue._tcp.local and returns the first IPv4
+// address it sees.
+func discoverBridgeMDNS(logger logging.Logger) (string, error) {
+	resolver, err := zeroconf.NewResolver(logger.AsZap())
+	if err != nil {
+		return "", fmt.Errorf("mDNS resolver: %w", err)
+	}
+	defer resolver.Shutdown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), mdnsBrowseTime)
+	defer cancel()
+
+	entries := make(chan *zeroconf.ServiceEntry, 8)
+	if err := resolver.Browse(ctx, "_hue._tcp", "local.", entries); err != nil {
+		return "", fmt.Errorf("mDNS browse: %w", err)
+	}
+
+	for {
+		select {
+		case entry, ok := <-entries:
+			if !ok {
+				return "", fmt.Errorf("no Hue bridge announced on mDNS")
+			}
+			if entry == nil {
+				continue
+			}
+			for _, ip := range entry.AddrIPv4 {
+				if ip != nil && !ip.IsUnspecified() {
+					logger.Debugf("mDNS found Hue bridge %s at %s", entry.Instance, ip)
+					return ip.String(), nil
+				}
+			}
+		case <-ctx.Done():
+			return "", fmt.Errorf("no Hue bridge announced on mDNS within %s", mdnsBrowseTime)
+		}
+	}
 }
 
 // resolveBridgeHost returns bridgeHost when set, otherwise discovers (and caches) one.
@@ -61,7 +113,7 @@ func resolveBridgeHost(bridgeHost string, logger logging.Logger) (string, error)
 	}
 
 	logger.Info("No bridge_host specified, discovering Hue bridge...")
-	host, err := DiscoverBridge()
+	host, err := DiscoverBridge(logger)
 	if err != nil {
 		return "", err
 	}

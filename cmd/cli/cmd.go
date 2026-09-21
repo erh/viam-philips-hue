@@ -39,7 +39,7 @@ func realMain() error {
 	// If bridge not specified, discover it
 	if *bridgeHost == "" {
 		logger.Info("No bridge specified, discovering...")
-		bridge, err := hue.DiscoverBridge()
+		bridge, err := hue.DiscoverBridge(logger)
 		if err != nil {
 			return fmt.Errorf("failed to discover bridge (pass -bridge <ip> to skip discovery): %w", err)
 		}

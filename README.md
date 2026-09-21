@@ -38,6 +38,7 @@ configuration error includes the instructions below.
 - Hue app: Settings > My Hue System > (your bridge) > the (i) icon shows the IP address
 - Open <https://discovery.meethue.com> in a browser; it lists bridges on your network
 - Look for a device named `Philips-hue` in your router's DHCP client list
+- Add a `hue-discovery` service with no attributes; it finds the bridge and logs the IP
 - Run `./bin/huecli -register`; it prints the discovered bridge IP
 
 ### Getting a username
@@ -69,12 +70,15 @@ Save the username for your Viam config.
 
 ## Quick start with discovery
 
-1. Add a `hue-discovery` service with your `username` (and `bridge_host`).
-2. Open the service's **Test** panel. It lists ready-to-add configs: one
-   `hue-bridge`, one `hue-room` per room or zone in the Hue app, one
-   `hue-light` per bulb, and one `hue-lights-mode` switch.
-3. Add the ones you want. Rooms are usually all you need for day-to-day
-   control; add individual lights only where you want per-bulb control.
+1. Add a `hue-discovery` service with empty attributes.
+2. Watch its logs: it finds the bridge and asks you to press the link
+   button. Press it. The service logs the new API key.
+3. Open the service's **Test** panel. It lists ready-to-add configs: one
+   `hue-bridge` (with the key filled in), one `hue-room` per room or zone in
+   the Hue app, one `hue-light` per bulb, and one `hue-lights-mode` switch.
+4. Add the `hue-bridge` first, then the ones you want. Rooms are usually all
+   you need for day-to-day control; add individual lights only where you
+   want per-bulb control.
 
 For five bulbs in two rooms that is about ten one-line components instead of
 one per bulb per color channel.
@@ -225,31 +229,45 @@ The `dance` config takes a **map of group name → light IDs**. All lights in a 
 
 ## hue-discovery
 
-Discovery service that lists everything on your bridge as ready-to-add configs.
+Discovery service that lists everything on your bridge as ready-to-add
+configs. It needs no configuration at all to get started:
+
+```json
+{}
+```
+
+With no `username`, the service:
+
+1. Finds the bridge on the local network over mDNS (falling back to Philips'
+   cloud discovery), or uses `bridge_host` if you set it.
+2. Logs a message asking you to press the round link button on the bridge,
+   and keeps checking every couple of seconds.
+3. Once the button has been pressed, logs the new API key and what to do
+   with it, and its **Test** panel starts listing configs.
+
+The first config listed is a `hue-bridge` component that already contains
+the key. Add it first, then add the rooms and lights, which reference it by
+name. Put the key in this service's `username` too so it does not have to
+register again after a restart:
 
 ```json
 {
-  "username": "your-api-username-here",
-  "bridge_host": "192.168.1.100"
+  "bridge_host": "192.168.1.100",
+  "username": "your-api-username-here"
 }
 ```
 
-Or, if you already have a `hue-bridge` component:
-
-```json
-{
-  "bridge": "hue-bridge"
-}
-```
+`GetStatus` reports `bridge_host`, `registered`, and a `next_step` message
+while registration is in progress.
 
 It emits:
 
-- a `hue-bridge` (only when configured with inline credentials), named `hue-bridge`
+- a `hue-bridge` component named `hue-bridge` with the host and key
 - one `hue-room` per room and zone, named after the room
 - one `hue-light` per bulb, named after the bulb
 - one `hue-lights-mode` named `hue-mode`, with a dance group per room and daylight/warm covering every white-capable light
 
-Names are sanitized (spaces and punctuation become `-`) and made unique by appending the Hue ID on collisions. Color capability is taken from the light's type, so a color bulb currently showing white is still detected as a color light.
+Names are sanitized (spaces and punctuation become `-`) and made unique by appending the kind or the Hue ID on collisions. Color capability is taken from the light's type, so a color bulb currently showing white is still detected as a color light.
 
 `DiscoverResources` accepts extras to trim the output: `{"lights": false}`, `{"rooms": false}`, or `{"mode": false}`.
 
