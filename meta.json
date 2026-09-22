@@ -35,6 +35,6 @@
     "build": "make module.tar.gz",
     "setup": "make setup",
     "path": "module.tar.gz",
-    "arch": ["linux/amd64", "linux/arm64", "darwin/arm64"]
+    "arch": ["linux/amd64", "linux/arm64", "darwin/arm64",  "windows/amd64"]
   }
 }
