@@ -6,16 +6,22 @@
   "description": "Philips Hue smart light control module for Viam",
   "models": [
     {
-      "api": "rdk:component:switch",
-      "model": "erh:viam-philips-hue:hue-light-brightness",
-      "short_description": "Philips Hue light on/off and brightness control",
-      "markdown_link": "README.md#hue-light-brightness"
+      "api": "rdk:component:generic",
+      "model": "erh:viam-philips-hue:hue-bridge",
+      "short_description": "Shared Philips Hue bridge connection referenced by the other models",
+      "markdown_link": "README.md#hue-bridge"
     },
     {
       "api": "rdk:component:switch",
-      "model": "erh:viam-philips-hue:hue-light-color",
-      "short_description": "Philips Hue light RGB color channel control",
-      "markdown_link": "README.md#hue-light-color"
+      "model": "erh:viam-philips-hue:hue-light",
+      "short_description": "Single Philips Hue bulb controlled as a switch",
+      "markdown_link": "README.md#hue-light"
+    },
+    {
+      "api": "rdk:component:switch",
+      "model": "erh:viam-philips-hue:hue-room",
+      "short_description": "Philips Hue room or zone controlled as one switch",
+      "markdown_link": "README.md#hue-room"
     },
     {
       "api": "rdk:component:switch",
@@ -26,7 +32,20 @@
     {
       "api": "rdk:service:discovery",
       "model": "erh:viam-philips-hue:hue-discovery",
-      "short_description": "Philips Hue Discovery Service"
+      "short_description": "Philips Hue Discovery Service",
+      "markdown_link": "README.md#hue-discovery"
+    },
+    {
+      "api": "rdk:component:switch",
+      "model": "erh:viam-philips-hue:hue-light-brightness",
+      "short_description": "Deprecated: Philips Hue light on/off and brightness control",
+      "markdown_link": "README.md#deprecated-models"
+    },
+    {
+      "api": "rdk:component:switch",
+      "model": "erh:viam-philips-hue:hue-light-color",
+      "short_description": "Deprecated: Philips Hue light RGB color channel control",
+      "markdown_link": "README.md#deprecated-models"
     }
   ],
   "entrypoint": "bin/viam-philips-hue",
