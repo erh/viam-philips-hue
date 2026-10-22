@@ -358,6 +358,9 @@ func (p *presetSwitch) Status(ctx context.Context) (map[string]interface{}, erro
 	}
 	out["position"] = int(pos)
 	out["preset"] = presets[pos].name
+	if lt, ok := p.target.(lightTarget); ok {
+		out["light_id"] = lt.id
+	}
 	return out, nil
 }
 

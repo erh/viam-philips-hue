@@ -98,6 +98,24 @@ with `"bridge": "<name>"`.
 `DoCommand` supports `{"command": "lights"}` and `{"command": "groups"}` to
 list what the bridge knows about, which is handy for finding IDs.
 
+To use `hue-entertainment` streaming the bridge also needs a `clientkey`, the
+32 hex digit (either case) key the bridge issues when a user is registered
+with `generateclientkey`:
+
+```json
+{
+  "bridge_host": "192.168.1.100",
+  "username": "your-api-username-here",
+  "clientkey": "00112233445566778899AABBCCDDEEFF"
+}
+```
+
+It is optional; without it everything except `hue-entertainment` works.
+`{"command": "bridge_info"}` returns the `clientkey` (`""` when unset). A
+user registered without `generateclientkey` has no client key, so re-pair
+(press the link button again, for example through `hue-discovery`) to get a
+new username and key.
+
 ## hue-light
 
 One bulb as a switch. Positions are named presets, and `DoCommand` sets any
@@ -167,8 +185,12 @@ full brightness, independent of `brightness`; `ct`/`kelvin` appear instead
 of `color` when the light is in color temperature mode.
 
 ```json
-{ "on": true, "brightness": 60, "color": "#FF8800", "colormode": "xy", "effect": "none", "position": 1, "preset": "on" }
+{ "on": true, "brightness": 60, "color": "#FF8800", "colormode": "xy", "effect": "none", "position": 1, "preset": "on", "light_id": 1 }
 ```
+
+`light_id` is the bridge's id for the bulb. It is in the status and in the
+response to an empty `DoCommand`, so a client can map a switch to the id the
+Entertainment stream uses.
 
 ## hue-room
 
@@ -227,6 +249,62 @@ Switching straight from one mode to another (for example `dance` to `daylight`) 
 
 The `dance` config takes a **map of group name → light IDs**. All lights in a group are kept in sync with each other. Groups are sorted alphabetically by name and then evenly offset around the full hue wheel (0–65535), so different groups always display different colors.
 
+## hue-entertainment
+
+Streams colors to a Hue Entertainment area, for effects that need many
+updates per second. The REST API behind the other models is limited to a few
+requests per second; this model uses the bridge's Entertainment stream
+instead. It needs a `hue-bridge` with a `clientkey`, and an Entertainment
+area made in the Hue app (Entertainment areas, not rooms or zones).
+
+```json
+{
+  "bridge": "hue-bridge",
+  "group_name": "Game Room",
+  "frame_rate_hz": 50
+}
+```
+
+- `bridge`: the `hue-bridge` component.
+- `group_id` or `group_name`: the Entertainment area. If it is not an
+  Entertainment group the error lists the ones found.
+- `frame_rate_hz`: frames sent per second. Default 50, maximum 60.
+
+### DoCommand
+
+```json
+{ "start": true }
+{ "frame": { "lights": { "1": [255, 0, 0], "2": [0, 0, 255] } } }
+{ "frame": { "brightness": { "1": 0.5 } } }
+{ "lights": true }
+{ "status": true }
+{ "stop": true }
+```
+
+- `start` opens the stream; `stop` closes it.
+- `lights` lists the lights in the area.
+- `frame` takes an object that sets colors (`lights`, keyed by light id, RGB 0-255) and/or
+  brightness (`brightness`, keyed by light id, 0-1). A light you leave out
+  keeps its value, and `brightness` alone rescales the current colors.
+- `status` returns `active`, `frames_sent` and `last_error`.
+
+### Entertainment streaming
+
+While streaming, the module sends the latest frame continuously at
+`frame_rate_hz`, and nothing until the first `frame`. The bridge closes an
+idle stream after about 10 seconds, so keep sending frames or `stop`. REST
+writes to the area's lights (from the other models) are ignored while the
+stream is open, so call `stop` first.
+
+The bridge forwards about 25 updates per second to the bulbs, so the useful
+rate is well below the 60 Hz ceiling; sending faster covers dropped UDP
+packets. A v1 Entertainment group holds about 10 lights. Colors are converted
+from sRGB to linear 16 bit; mid-tones are an open question to check on real
+bulbs.
+
+This uses the v1 stream format. HueStream v2 (`entertainment_configuration`
+with channel ids and gradient segments) is planned as a follow-up.
+
 ## hue-discovery
 
 Discovery service that lists everything on your bridge as ready-to-add
@@ -254,6 +332,18 @@ register again after a restart:
 {
   "bridge_host": "192.168.1.100",
   "username": "your-api-username-here"
+}
+```
+
+Registration asks the bridge for a client key too. It is logged next to the
+username and put in the generated `hue-bridge` config as `clientkey`. To keep
+it across restarts, set `clientkey` on this service as well:
+
+```json
+{
+  "bridge_host": "192.168.1.100",
+  "username": "your-api-username-here",
+  "clientkey": "00112233445566778899AABBCCDDEEFF"
 }
 ```
 

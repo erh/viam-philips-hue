@@ -36,6 +36,12 @@
       "markdown_link": "README.md#hue-discovery"
     },
     {
+      "api": "rdk:component:generic",
+      "model": "erh:viam-philips-hue:hue-entertainment",
+      "short_description": "Philips Hue Entertainment streaming (DTLS) for a v1 Entertainment group",
+      "markdown_link": "README.md#hue-entertainment"
+    },
+    {
       "api": "rdk:component:switch",
       "model": "erh:viam-philips-hue:hue-light-brightness",
       "short_description": "Deprecated: Philips Hue light on/off and brightness control",

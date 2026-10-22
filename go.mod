@@ -4,6 +4,7 @@ go 1.25.10
 
 require (
 	github.com/amimof/huego v1.2.1
+	github.com/pion/dtls/v3 v3.1.4
 	github.com/viamrobotics/zeroconf v1.0.13
 	go.viam.com/rdk v1.8.0
 )
@@ -145,6 +146,7 @@ require (
 	github.com/pion/stun v0.6.1 // indirect
 	github.com/pion/transport/v2 v2.2.10 // indirect
 	github.com/pion/transport/v3 v3.1.1 // indirect
+	github.com/pion/transport/v4 v4.0.2 // indirect
 	github.com/pion/turn/v2 v2.1.6 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
