@@ -35,6 +35,7 @@ func init() {
 type DiscoveryConfig struct {
 	BridgeHost string `json:"bridge_host,omitempty"`
 	Username   string `json:"username,omitempty"`
+	ClientKey  string `json:"clientkey,omitempty"`
 }
 
 func (cfg *DiscoveryConfig) Validate(path string) ([]string, []string, error) {
@@ -58,6 +59,30 @@ func CreateUser(bridgeHost, deviceType string) (string, error) {
 	return user, nil
 }
 
+// CreateUserWithClientKey is like CreateUser but also asks the bridge for an
+// Entertainment client key. It returns the username and the client key.
+func CreateUserWithClientKey(bridgeHost, deviceType string) (string, string, error) {
+	bridge := huego.New(bridgeHost, "")
+	wl, err := bridge.CreateUserWithClientKey(deviceType)
+	if err != nil {
+		return "", "", err
+	}
+	return wl.Username, wl.ClientKey, nil
+}
+
+// bridgeAttributes builds the hue-bridge attributes; clientkey is included
+// only when one is known.
+func bridgeAttributes(host, username, clientKey string) utils.AttributeMap {
+	attrs := utils.AttributeMap{
+		"bridge_host": host,
+		"username":    username,
+	}
+	if clientKey != "" {
+		attrs["clientkey"] = clientKey
+	}
+	return attrs
+}
+
 // SetBridge points the discovery at a bridge using known credentials (CLI use).
 func (s *HueDiscover) SetBridge(host, username string) {
 	s.mu.Lock()
@@ -73,11 +98,12 @@ type HueDiscover struct {
 	name   resource.Name
 	logger logging.Logger
 
-	mu       sync.Mutex
-	host     string        // bridge IP once known
-	username string        // API key once known
-	bridge   *huego.Bridge // set once host and username are both known
-	status   string        // what the user should do next, if anything
+	mu        sync.Mutex
+	host      string        // bridge IP once known
+	username  string        // API key once known
+	clientKey string        // Entertainment client key, if known
+	bridge    *huego.Bridge // set once host and username are both known
+	status    string        // what the user should do next, if anything
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -94,6 +120,8 @@ func newHueDiscover(ctx context.Context, _ resource.Dependencies, rawConf resour
 		logger:   logger,
 		host:     conf.BridgeHost,
 		username: conf.Username,
+
+		clientKey: conf.ClientKey,
 	}
 
 	if conf.Username != "" {
@@ -187,15 +215,17 @@ func (s *HueDiscover) register(ctx context.Context) {
 		case <-time.After(pollEvery):
 		}
 
-		username, err := bridge.CreateUserContext(ctx, deviceType)
-		if err == nil && username != "" {
+		wl, err := bridge.CreateUserWithClientKeyContext(ctx, deviceType)
+		if err == nil && wl.Username != "" {
+			username := wl.Username
 			s.mu.Lock()
 			s.username = username
+			s.clientKey = wl.ClientKey
 			s.bridge = huego.New(host, username)
 			s.status = ""
 			s.mu.Unlock()
 
-			s.logger.Infof("Registered with the Hue bridge at %s. Your API key (username) is: %s", host, username)
+			s.logger.Infof("Registered with the Hue bridge at %s. Your API key (username) is: %s and your Entertainment clientkey is: %s", host, username, wl.ClientKey)
 			s.logger.Infof("Next: open this service's Test panel and add the hue-bridge component it lists first (it already contains this key), then add the rooms and lights. Also put the key in this service's username attribute so it survives restarts.")
 			return
 		}
@@ -321,7 +351,7 @@ func extraBool(extra map[string]any, key string, def bool) bool {
 
 func (s *HueDiscover) DiscoverHue(ctx context.Context, extra map[string]any) ([]resource.Config, error) {
 	s.mu.Lock()
-	bridge, host, username, status := s.bridge, s.host, s.username, s.status
+	bridge, host, username, clientKey, status := s.bridge, s.host, s.username, s.clientKey, s.status
 	s.mu.Unlock()
 
 	if bridge == nil {
@@ -348,13 +378,10 @@ func (s *HueDiscover) DiscoverHue(ctx context.Context, extra map[string]any) ([]
 	// The bridge comes first: everything else references it by name.
 	bridgeName := names.allocate("hue-bridge", "bridge", 0)
 	configs = append(configs, resource.Config{
-		Name:  bridgeName,
-		API:   generic.API,
-		Model: HueBridge,
-		Attributes: utils.AttributeMap{
-			"bridge_host": host,
-			"username":    username,
-		},
+		Name:       bridgeName,
+		API:        generic.API,
+		Model:      HueBridge,
+		Attributes: bridgeAttributes(host, username, clientKey),
 	})
 
 	colorIDs := map[int]bool{}

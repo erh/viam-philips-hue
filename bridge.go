@@ -3,6 +3,7 @@ package hue
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sync"
 
 	"github.com/amimof/huego"
@@ -27,23 +28,34 @@ func init() {
 type BridgeConfig struct {
 	BridgeHost string `json:"bridge_host,omitempty"`
 	Username   string `json:"username"`
+	// ClientKey is the 32-hex-digit Entertainment streaming key returned by a
+	// registration that asked for generateclientkey. Optional; only
+	// hue-entertainment needs it. SEAM: hue-entertainment reads it from
+	// bridge_info as "clientkey".
+	ClientKey string `json:"clientkey,omitempty"`
 }
 
 func (cfg *BridgeConfig) Validate(path string) ([]string, []string, error) {
 	if cfg.Username == "" {
 		return nil, nil, errMissingUsername()
 	}
+	if cfg.ClientKey != "" && !clientKeyRe.MatchString(cfg.ClientKey) {
+		return nil, nil, fmt.Errorf("%s: clientkey must be 32 hexadecimal digits (as returned when the bridge user was created with generateclientkey)", path)
+	}
 	return nil, nil, nil
 }
+
+var clientKeyRe = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
 
 type hueBridge struct {
 	resource.AlwaysRebuild
 
-	name     resource.Name
-	logger   logging.Logger
-	host     string
-	username string
-	bridge   *huego.Bridge
+	name      resource.Name
+	logger    logging.Logger
+	host      string
+	username  string
+	clientKey string
+	bridge    *huego.Bridge
 }
 
 func newHueBridge(ctx context.Context, _ resource.Dependencies, rawConf resource.Config, logger logging.Logger) (resource.Resource, error) {
@@ -58,11 +70,12 @@ func newHueBridge(ctx context.Context, _ resource.Dependencies, rawConf resource
 	}
 
 	b := &hueBridge{
-		name:     rawConf.ResourceName(),
-		logger:   logger,
-		host:     host,
-		username: conf.Username,
-		bridge:   huego.New(host, conf.Username),
+		name:      rawConf.ResourceName(),
+		logger:    logger,
+		host:      host,
+		username:  conf.Username,
+		clientKey: conf.ClientKey,
+		bridge:    huego.New(host, conf.Username),
 	}
 
 	if _, err := b.bridge.GetConfig(); err != nil {
@@ -88,14 +101,15 @@ func (b *hueBridge) Status(ctx context.Context) (map[string]interface{}, error) 
 
 // DoCommand supports:
 //
-//	{"command": "bridge_info"} -> bridge_host and username (used by dependents)
+//	{"command": "bridge_info"} -> bridge_host, username, and clientkey ("" when
+//	                              not configured), used by dependents
 //	{"command": "lights"}      -> every light the bridge knows about
 //	{"command": "groups"}      -> every room/zone/group the bridge knows about
 func (b *hueBridge) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, _ := cmd["command"].(string)
 	switch command {
 	case "bridge_info":
-		return map[string]interface{}{"bridge_host": b.host, "username": b.username}, nil
+		return map[string]interface{}{"bridge_host": b.host, "username": b.username, "clientkey": b.clientKey}, nil
 	case "lights":
 		lights, err := b.bridge.GetLightsContext(ctx)
 		if err != nil {

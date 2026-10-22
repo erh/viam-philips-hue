@@ -18,6 +18,7 @@ func main() {
 		resource.APIModel{API: toggleswitch.API, Model: hue.HueLightBrightness},
 		resource.APIModel{API: toggleswitch.API, Model: hue.HueLightColor},
 		resource.APIModel{API: toggleswitch.API, Model: hue.HueLightMode},
+		resource.APIModel{API: generic.API, Model: hue.HueEntertainment},
 		resource.APIModel{API: discovery.API, Model: hue.HueDiscovery},
 	)
 }

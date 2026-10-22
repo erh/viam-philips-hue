@@ -2,9 +2,13 @@ package hue
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/amimof/huego"
+	"go.viam.com/rdk/logging"
 )
 
 // Hue Bri has 254 levels for 255 channel values, so exactly one value must
@@ -224,5 +228,64 @@ func TestConfiguredStateGivesTwoPositions(t *testing.T) {
 	}
 	if err := fixed.SetPosition(ctx, 2, nil); err == nil {
 		t.Fatal("position 2 should be rejected on a configured switch")
+	}
+}
+
+func TestBridgeClientKeyValidation(t *testing.T) {
+	cases := []struct {
+		name, key string
+		ok        bool
+	}{
+		{"absent", "", true},
+		{"valid", "0123456789abcdef0123456789abcdef", true},
+		{"upper case", "0123456789ABCDEF0123456789ABCDEF", true},
+		{"31 chars", "0123456789abcdef0123456789abcde", false},
+		{"33 chars", "0123456789abcdef0123456789abcdef0", false},
+		{"non-hex", "0123456789abcdef0123456789abcdeg", false},
+	}
+	for _, c := range cases {
+		_, _, err := (&BridgeConfig{Username: "u", ClientKey: c.key}).Validate("bridge")
+		if c.ok && err != nil {
+			t.Errorf("%s: unexpected error %v", c.name, err)
+		}
+		if !c.ok && (err == nil || !strings.Contains(err.Error(), "clientkey")) {
+			t.Errorf("%s: want error naming clientkey, got %v", c.name, err)
+		}
+	}
+}
+
+func TestBridgeAttributesClientKey(t *testing.T) {
+	with := bridgeAttributes("10.0.0.2", "user", "0123456789abcdef0123456789abcdef")
+	if with["clientkey"] != "0123456789abcdef0123456789abcdef" || with["username"] != "user" || with["bridge_host"] != "10.0.0.2" {
+		t.Fatalf("unexpected attributes %v", with)
+	}
+	without := bridgeAttributes("10.0.0.2", "user", "")
+	if _, ok := without["clientkey"]; ok {
+		t.Fatalf("clientkey should be omitted when unset, got %v", without)
+	}
+}
+
+func TestLightStatusReportsLightID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"state":{"on":true,"bri":254,"colormode":"xy","xy":[0.5,0.4]},"name":"lamp"}`))
+	}))
+	defer srv.Close()
+	bridge := huego.New(strings.TrimPrefix(srv.URL, "http://"), "user")
+
+	light := &presetSwitch{target: lightTarget{bridge: bridge, id: 7}, logger: logging.NewTestLogger(t)}
+	out, err := light.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["light_id"] != 7 {
+		t.Fatalf("light status light_id = %v, want 7", out["light_id"])
+	}
+
+	group := &presetSwitch{target: groupTarget{bridge: bridge, id: 3}, logger: logging.NewTestLogger(t)}
+	out, err = group.Status(context.Background())
+	if err == nil {
+		if _, ok := out["light_id"]; ok {
+			t.Fatalf("group status must not report light_id, got %v", out)
+		}
 	}
 }
